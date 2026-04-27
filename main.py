@@ -58,6 +58,7 @@ class BurevestnikApp(ctk.CTk):
         self.roi_start_y = 0
         self.roi_coords = [100, 100, 300, 300]
         self.roi_alert_active = False
+        self.last_table_data = None
 
         self.track_history = defaultdict(lambda: [])
         self.track_last_seen = {}
@@ -176,6 +177,16 @@ class BurevestnikApp(ctk.CTk):
             self.change_camera(self.cam_select.get())
 
         self.update_frame()
+
+    def tables_are_equal(self, data1, data2):
+        if data1 is None or data2 is None:
+            return False
+        if len(data1) != len(data2):
+            return False
+        for row1, row2 in zip(data1, data2):
+            if row1 != row2:
+                return False
+        return True
 
     def on_source_type_change(self):
         if self.source_type_var.get() == "camera":
@@ -391,6 +402,7 @@ class BurevestnikApp(ctk.CTk):
 
     def update_table(self):
         detections_sorted = sorted(self.current_detections, key=lambda d: d[0])[:5]
+
         table_data = [["ID", "Тип", "X", "Y", "Статус"]]
         intrusion_detected = False
 
@@ -403,8 +415,11 @@ class BurevestnikApp(ctk.CTk):
                     intrusion_detected = True
             else:
                 table_data.append(["", "", "", "", ""])
-        self.table.update_values(table_data)
-        self.table.update()
+
+        if not self.tables_are_equal(self.last_table_data, table_data):
+            self.table.update_values(table_data)
+            self.table.update()
+            self.last_table_data = [row[:] for row in table_data]
 
         if intrusion_detected:
             self.status_label.configure(
