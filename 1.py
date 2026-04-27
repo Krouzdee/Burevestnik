@@ -4,8 +4,8 @@ import numpy as np
 from ultralytics import YOLO
 from PIL import Image, ImageDraw, ImageFont
 
-model = YOLO("last.pt")
-
+model = YOLO("best.pt")
+print(model.names)
 font = ImageFont.truetype("arial.ttf", 20)
 
 
@@ -47,6 +47,13 @@ out = cv2.VideoWriter("out.mp4", fourcc, fps, (width, height))
 track_history = defaultdict(lambda: [])
 track_last_seen = {}
 
+colors = {
+    0: (0, 0, 128),
+    1: (0, 128, 0),
+    2: (128, 0, 0),
+}
+
+
 MAX_MISSED = int(fps * 1)
 frame_idx = 0
 
@@ -59,7 +66,7 @@ while cap.isOpened():
 
     frame_idx += 1
 
-    results = model.track(frame, persist=True, conf=0.5)
+    results = model.track(frame, persist=True, conf=0.25)
 
     annotated_frame = frame.copy()
 
@@ -68,7 +75,7 @@ while cap.isOpened():
         track_ids = results[0].boxes.id.int().cpu().tolist()
         class_ids = results[0].boxes.cls.int().cpu().tolist()
 
-        names = model.names
+        names = {0: "Самолёт", 1: "Квадракоптер", 2: "Вертолёт"}
 
         for box, track_id, cls_id in zip(boxes, track_ids, class_ids):
             x1, y1, x2, y2 = map(int, box)
@@ -78,12 +85,12 @@ while cap.isOpened():
 
             track = track_history[track_id]
             track.append((cx, cy))
-            if len(track) > 30:
+            if len(track) > 300:
                 track.pop(0)
 
             track_last_seen[track_id] = frame_idx
 
-            cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), colors[cls_id], 2)
 
             label = f"ID:{track_id} {names[cls_id]} ({cx},{cy})"
             text_y = y1 - 25 if y1 - 25 > 10 else y1 + 25
@@ -94,7 +101,7 @@ while cap.isOpened():
                 (x1, text_y),
                 font,
                 text_color=(255, 255, 255),
-                bg_color=(0, 0, 255),
+                bg_color=colors[cls_id],
             )
 
     for track_id, track in track_history.items():
@@ -110,8 +117,8 @@ while cap.isOpened():
             annotated_frame,
             [points],
             isClosed=False,
-            color=(230, 230, 230),
-            thickness=2,
+            color=colors[cls_id],
+            thickness=10,
         )
 
     to_delete = [
