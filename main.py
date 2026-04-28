@@ -372,20 +372,16 @@ class BurevestnikApp(ctk.CTk):
 
         track_layer = frame.copy()
 
-        if (
-            results[0].boxes is not None
-            and results[0].boxes.id is not None
-            and not self.is_hide
-        ):
-            boxes = results[0].boxes.xyxy.cpu()
+        beep = False
+        if results[0].boxes is not None and results[0].boxes.id is not None:
+            boxes_xyxy = results[0].boxes.xyxy.cpu()
             track_ids = results[0].boxes.id.int().cpu().tolist()
             class_ids = results[0].boxes.cls.int().cpu().tolist()
 
-            for box, track_id, cls_id in zip(boxes, track_ids, class_ids):
+            for box, track_id, cls_id in zip(boxes_xyxy, track_ids, class_ids):
                 active_ids.add(track_id)
 
                 x1, y1, x2, y2 = box.tolist()
-
                 x1 = int(x1 / scale)
                 y1 = int(y1 / scale)
                 x2 = int(x2 / scale)
@@ -396,7 +392,6 @@ class BurevestnikApp(ctk.CTk):
 
                 track = self.track_history[track_id]
                 track.append((cx, cy))
-
                 if len(track) > 200:
                     track.pop(0)
 
@@ -404,55 +399,20 @@ class BurevestnikApp(ctk.CTk):
                 self.track_class[track_id] = cls_id
 
                 status = "НОРМА"
-
-                if self.drawing_roi and self.box_intersects_roi(x1, y1, x2, y2):
+                if (
+                    self.drawing_roi
+                    and self.box_intersects_roi(x1, y1, x2, y2)
+                    and not beep
+                ):
                     if self.frame_idx % 5 == 0:
-                        winsound.Beep(1000, 500)
+                        self.after(1, lambda: winsound.Beep(1000, 500))
+                        beep = True
                     status = "ТРЕВОГА"
 
                 self.current_detections.append((track_id, cls_id, cx, cy, status))
 
-            for track_id, track in self.track_history.items():
-                if track_id not in active_ids:
-                    continue
-
-                if self.frame_idx - self.track_last_seen.get(track_id, 0) > max_missed:
-                    continue
-
-                if len(track) < 2:
-                    continue
-
-                cls_id = self.track_class.get(track_id, 0)
-                points = np.hstack(track).astype(np.int32).reshape((-1, 1, 2))
-
-                cv2.polylines(
-                    track_layer,
-                    [points],
-                    isClosed=False,
-                    color=colors.get(cls_id, (0, 255, 255)),
-                    thickness=10,
-                )
-
-        frame = track_layer
-
-        if results[0].boxes is not None and results[0].boxes.id is not None:
-            boxes = results[0].boxes.xyxy.cpu()
-            track_ids = results[0].boxes.id.int().cpu().tolist()
-            class_ids = results[0].boxes.cls.int().cpu().tolist()
-
-            for box, track_id, cls_id in zip(boxes, track_ids, class_ids):
-                x1, y1, x2, y2 = box.tolist()
-
-                x1 = int(x1 / scale)
-                y1 = int(y1 / scale)
-                x2 = int(x2 / scale)
-                y2 = int(y2 / scale)
-
-                cx = int((x1 + x2) / 2)
-                cy = int((y1 + y2) / 2)
-
                 cv2.rectangle(
-                    frame,
+                    track_layer,
                     (x1, y1),
                     (x2, y2),
                     colors.get(cls_id, (255, 255, 255)),
@@ -462,8 +422,8 @@ class BurevestnikApp(ctk.CTk):
                 label = f"ID:{track_id} {names.get(cls_id, 'Объект')} ({cx},{cy})"
                 text_y = y1 - 40 if y1 - 40 > 10 else y1 + 40
 
-                frame = draw_text_cv2(
-                    frame,
+                track_layer = draw_text_cv2(
+                    track_layer,
                     label,
                     (x1, text_y),
                     font,
@@ -471,17 +431,41 @@ class BurevestnikApp(ctk.CTk):
                     bg_color=bgr_to_rgb(colors.get(cls_id, (128, 128, 128))),
                 )
 
-        if not self.is_hide:
-            to_delete = [
-                tid
-                for tid in self.track_history
-                if self.frame_idx - self.track_last_seen.get(tid, 0) > max_missed
-            ]
+            if not self.is_hide:
+                for track_id, track in self.track_history.items():
+                    if track_id not in active_ids:
+                        continue
+                    if (
+                        self.frame_idx - self.track_last_seen.get(track_id, 0)
+                        > max_missed
+                    ):
+                        continue
+                    if len(track) < 2:
+                        continue
 
-            for tid in to_delete:
-                self.track_history.pop(tid, None)
-                self.track_last_seen.pop(tid, None)
-                self.track_class.pop(tid, None)
+                    cls_id = self.track_class.get(track_id, 0)
+                    points = np.hstack(track).astype(np.int32).reshape((-1, 1, 2))
+
+                    cv2.polylines(
+                        track_layer,
+                        [points],
+                        isClosed=False,
+                        color=colors.get(cls_id, (0, 255, 255)),
+                        thickness=10,
+                    )
+
+        frame = track_layer
+
+        to_delete = [
+            tid
+            for tid in self.track_history
+            if self.frame_idx - self.track_last_seen.get(tid, 0) > max_missed
+        ]
+
+        for tid in to_delete:
+            self.track_history.pop(tid, None)
+            self.track_last_seen.pop(tid, None)
+            self.track_class.pop(tid, None)
 
         return frame
 
