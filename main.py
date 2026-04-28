@@ -3,14 +3,23 @@ from CTkTable import CTkTable
 import cv2
 from PIL import Image, ImageDraw, ImageFont
 from ultralytics import YOLO
+from pygrabber.dshow_graph import FilterGraph
 from collections import defaultdict
 import numpy as np
+import torch
 from tkinter import filedialog
 
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
 
-model = YOLO("best.pt")
+if torch.cuda.is_available():
+    DEVICE = "cuda"
+else:
+    DEVICE = "cpu"
+
+model = YOLO("best_drone_detect_scale.pt")
+model.to(DEVICE)
+
 names = {0: "Самолёт", 1: "Квадракоптер", 2: "Вертолёт"}
 colors = {
     0: (0, 0, 128),
@@ -26,6 +35,10 @@ def center(work, x: int, y: int) -> str:
     POS_X = work.winfo_screenwidth() // 2 - x // 2
     POS_Y = work.winfo_screenheight() // 2 - y // 2
     return f"{x}x{y}+{POS_X}+{POS_Y}"
+
+
+def bgr_to_rgb(c):
+    return (c[2], c[1], c[0])
 
 
 def draw_text_cv2(
@@ -142,7 +155,7 @@ class BurevestnikApp(ctk.CTk):
 
         self.btn_roi = ctk.CTkButton(
             self.control_panel,
-            text="Включить ROI",
+            text="Включить зону интереса",
             height=40,
             fg_color="#2b7b50",
             command=self.toggle_roi_mode,
@@ -193,7 +206,10 @@ class BurevestnikApp(ctk.CTk):
             self.btn_browse.place_forget()
             self.cam_select.place(x=30, y=110, relwidth=0.7)
             self.file_path_label.configure(text="")
-            if self.cam_select.get() != "Камеры не найдены":
+            if (
+                self.cam_select.get() != "Камеры не найдены"
+                and self.video_source_type == "file"
+            ):
                 self.change_camera(self.cam_select.get())
         else:
             self.cam_select.place_forget()
@@ -276,17 +292,18 @@ class BurevestnikApp(ctk.CTk):
         self.drawing_roi = not self.drawing_roi
         self.roi_drawing_active = False
         color = "#8b2e2e" if self.drawing_roi else "#2b7b50"
-        txt = "Выключить ROI" if self.drawing_roi else "Включить ROI"
+        txt = (
+            "Выключить зону интереса" if self.drawing_roi else "Включить зону интереса"
+        )
         self.btn_roi.configure(text=txt, fg_color=color)
 
     def get_available_cameras(self):
-        cams = []
-        for i in range(3):
-            temp = cv2.VideoCapture(i)
-            if temp.isOpened():
-                cams.append(f"Камера {i}")
-                temp.release()
-        return cams if cams else ["Камеры не найдены"]
+        devices = FilterGraph().get_input_devices()
+
+        if not devices:
+            return ["Камеры не найдены"]
+
+        return devices
 
     def change_camera(self, choice):
         if self.cap:
@@ -296,7 +313,7 @@ class BurevestnikApp(ctk.CTk):
             self.track_class.clear()
             self.frame_idx = 0
         try:
-            idx = int(choice.split()[-1])
+            idx = self.cam_select._values.index(choice)
             self.cap = cv2.VideoCapture(idx)
             self.video_source_type = "camera"
             self.fps = self.cap.get(cv2.CAP_PROP_FPS)
@@ -305,19 +322,39 @@ class BurevestnikApp(ctk.CTk):
         except:
             pass
 
-    def is_point_in_roi(self, cx, cy):
-        rx, ry, rw, rh = self.roi_coords
-        return rx <= cx <= rx + rw and ry <= cy <= ry + rh
-
     def process_frame(self, frame):
         self.frame_idx += 1
         self.current_detections = []
 
-        results = model.track(frame, persist=True, conf=0.25, verbose=False)
+        original_h, original_w = frame.shape[:2]
+        MAX_SIZE = 640
+
+        scale = min(MAX_SIZE / original_w, MAX_SIZE / original_h)
+
+        if scale < 1.0:
+            new_w = int(original_w * scale)
+            new_h = int(original_h * scale)
+            resized_frame = cv2.resize(
+                frame, (new_w, new_h), interpolation=cv2.INTER_AREA
+            )
+        else:
+            resized_frame = frame
+            scale = 1.0
+
+        results = model.track(
+            resized_frame,
+            persist=True,
+            conf=0.7,
+            verbose=False,
+            imgsz=640,
+            device=DEVICE,
+            half=True if DEVICE == "cuda" else False,
+        )
 
         max_missed = int(self.fps * 1)
-
         active_ids = set()
+
+        track_layer = frame.copy()
 
         if results[0].boxes is not None and results[0].boxes.id is not None:
             boxes = results[0].boxes.xyxy.cpu()
@@ -326,20 +363,79 @@ class BurevestnikApp(ctk.CTk):
 
             for box, track_id, cls_id in zip(boxes, track_ids, class_ids):
                 active_ids.add(track_id)
-                x1, y1, x2, y2 = map(int, box)
+
+                x1, y1, x2, y2 = box.tolist()
+
+                x1 = int(x1 / scale)
+                y1 = int(y1 / scale)
+                x2 = int(x2 / scale)
+                y2 = int(y2 / scale)
+
                 cx = int((x1 + x2) / 2)
                 cy = int((y1 + y2) / 2)
 
                 track = self.track_history[track_id]
                 track.append((cx, cy))
-                if len(track) > 300:
+
+                if len(track) > 200:
                     track.pop(0)
 
                 self.track_last_seen[track_id] = self.frame_idx
                 self.track_class[track_id] = cls_id
 
+                status = "НОРМА"
+
+                if self.drawing_roi and self.box_intersects_roi(x1, y1, x2, y2):
+                    status = "ТРЕВОГА"
+
+                self.current_detections.append((track_id, cls_id, cx, cy, status))
+
+            for track_id, track in self.track_history.items():
+                if track_id not in active_ids:
+                    continue
+
+                if self.frame_idx - self.track_last_seen.get(track_id, 0) > max_missed:
+                    continue
+
+                if len(track) < 2:
+                    continue
+
+                cls_id = self.track_class.get(track_id, 0)
+                points = np.hstack(track).astype(np.int32).reshape((-1, 1, 2))
+
+                cv2.polylines(
+                    track_layer,
+                    [points],
+                    isClosed=False,
+                    color=colors.get(cls_id, (0, 255, 255)),
+                    thickness=10,
+                )
+
+        frame = track_layer
+
+        if results[0].boxes is not None and results[0].boxes.id is not None:
+            boxes = results[0].boxes.xyxy.cpu()
+            track_ids = results[0].boxes.id.int().cpu().tolist()
+            class_ids = results[0].boxes.cls.int().cpu().tolist()
+            print(results[0].boxes.conf)
+
+            for box, track_id, cls_id in zip(boxes, track_ids, class_ids):
+                x1, y1, x2, y2 = box.tolist()
+
+                x1 = int(x1 / scale)
+                y1 = int(y1 / scale)
+                x2 = int(x2 / scale)
+                y2 = int(y2 / scale)
+
+                cx = int((x1 + x2) / 2)
+                cy = int((y1 + y2) / 2)
+
                 cv2.rectangle(
-                    frame, (x1, y1), (x2, y2), colors.get(cls_id, (255, 255, 255)), 3
+                    frame,
+                    (x1, y1),
+                    (x2, y2),
+                    colors.get(cls_id, (255, 255, 255)),
+                    3,
                 )
 
                 label = f"ID:{track_id} {names.get(cls_id, 'Объект')} ({cx},{cy})"
@@ -351,33 +447,7 @@ class BurevestnikApp(ctk.CTk):
                     (x1, text_y),
                     font,
                     text_color=(255, 255, 255),
-                    bg_color=colors.get(cls_id, (128, 128, 128)),
-                )
-
-                status = "НОРМА"
-                if self.drawing_roi and self.is_point_in_roi(cx, cy):
-                    status = "ТРЕВОГА"
-                self.current_detections.append((track_id, cls_id, cx, cy, status))
-
-            points_to_draw = []
-            for track_id, track in self.track_history.items():
-                if track_id not in active_ids:
-                    continue
-                if self.frame_idx - self.track_last_seen.get(track_id, 0) > max_missed:
-                    continue
-                if len(track) < 2:
-                    continue
-                cls_id = self.track_class.get(track_id, 0)
-                points = np.hstack(track).astype(np.int32).reshape((-1, 1, 2))
-                points_to_draw.append((points, cls_id))
-
-            for points, cls_id in points_to_draw:
-                cv2.polylines(
-                    frame,
-                    [points],
-                    isClosed=False,
-                    color=colors.get(cls_id, (0, 255, 255)),
-                    thickness=5,
+                    bg_color=bgr_to_rgb(colors.get(cls_id, (128, 128, 128))),
                 )
 
         to_delete = [
@@ -385,6 +455,7 @@ class BurevestnikApp(ctk.CTk):
             for tid in self.track_history
             if self.frame_idx - self.track_last_seen.get(tid, 0) > max_missed
         ]
+
         for tid in to_delete:
             self.track_history.pop(tid, None)
             self.track_last_seen.pop(tid, None)
@@ -464,26 +535,33 @@ class BurevestnikApp(ctk.CTk):
                     roi_color = (0, 0, 255) if self.roi_alert_active else (0, 255, 0)
                     cv2.rectangle(frame, (x, y), (x + w, y + h), roi_color, 3)
 
-                f_w = self.video_frame.winfo_width()
-                f_h = self.video_frame.winfo_height()
+                f_w = 600
+                f_h = 700
 
-                if f_w > 10 and f_h > 10:
-                    aspect = cam_w / cam_h
-                    tw, th = f_w, int(f_w / aspect)
-                    if th > f_h:
-                        th, tw = f_h, int(f_h * aspect)
+                if cam_w > cam_h:
+                    aspect = f_w / cam_w
+                    tw, th = f_w, int(cam_h * aspect)
+                else:
+                    aspect = f_h / cam_h
+                    tw, th = int(cam_w * aspect), f_h
 
-                    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    pil_img = Image.fromarray(frame_rgb)
+                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                pil_img = Image.fromarray(frame_rgb)
 
-                    ctk_img = ctk.CTkImage(
-                        light_image=pil_img, dark_image=pil_img, size=(tw, th)
-                    )
+                ctk_img = ctk.CTkImage(
+                    light_image=pil_img, dark_image=pil_img, size=(tw, th)
+                )
 
-                    self.video_label.configure(image=ctk_img)
-                    self.video_label.image = ctk_img
+                self.video_label.configure(image=ctk_img)
+                self.video_label.image = ctk_img
 
-        self.after(15, self.update_frame)
+        self.after(5, self.update_frame)
+
+    def box_intersects_roi(self, x1, y1, x2, y2):
+        rx, ry, rw, rh = self.roi_coords
+        rx2, ry2 = rx + rw, ry + rh
+
+        return not (x2 < rx or x1 > rx2 or y2 < ry or y1 > ry2)
 
 
 if __name__ == "__main__":
