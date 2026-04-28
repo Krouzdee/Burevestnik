@@ -8,6 +8,7 @@ from collections import defaultdict
 import numpy as np
 import torch
 from tkinter import filedialog
+import winsound
 
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
@@ -72,6 +73,7 @@ class BurevestnikApp(ctk.CTk):
         self.roi_coords = [100, 100, 300, 300]
         self.roi_alert_active = False
         self.last_table_data = None
+        self.is_hide = False
 
         self.track_history = defaultdict(lambda: [])
         self.track_last_seen = {}
@@ -184,12 +186,26 @@ class BurevestnikApp(ctk.CTk):
         )
         self.status_label.place(relx=0.5, rely=0.95, anchor="center")
 
+        self.hide_switch = ctk.CTkSwitch(
+            self.control_panel,
+            text="Отображать трекеры",
+            height=10,
+            width=50,
+            command=self.change_hide,
+        )
+        self.hide_switch.place(x=30, y=150)
+
+        self.hide_switch.select()
+
         self.video_file_path = None
 
         if self.cam_select.get() != "Камеры не найдены":
             self.change_camera(self.cam_select.get())
 
         self.update_frame()
+
+    def change_hide(self):
+        self.is_hide = not self.is_hide
 
     def tables_are_equal(self, data1, data2):
         if data1 is None or data2 is None:
@@ -356,7 +372,11 @@ class BurevestnikApp(ctk.CTk):
 
         track_layer = frame.copy()
 
-        if results[0].boxes is not None and results[0].boxes.id is not None:
+        if (
+            results[0].boxes is not None
+            and results[0].boxes.id is not None
+            and not self.is_hide
+        ):
             boxes = results[0].boxes.xyxy.cpu()
             track_ids = results[0].boxes.id.int().cpu().tolist()
             class_ids = results[0].boxes.cls.int().cpu().tolist()
@@ -386,6 +406,8 @@ class BurevestnikApp(ctk.CTk):
                 status = "НОРМА"
 
                 if self.drawing_roi and self.box_intersects_roi(x1, y1, x2, y2):
+                    if self.frame_idx % 5 == 0:
+                        winsound.Beep(1000, 500)
                     status = "ТРЕВОГА"
 
                 self.current_detections.append((track_id, cls_id, cx, cy, status))
@@ -417,7 +439,6 @@ class BurevestnikApp(ctk.CTk):
             boxes = results[0].boxes.xyxy.cpu()
             track_ids = results[0].boxes.id.int().cpu().tolist()
             class_ids = results[0].boxes.cls.int().cpu().tolist()
-            print(results[0].boxes.conf)
 
             for box, track_id, cls_id in zip(boxes, track_ids, class_ids):
                 x1, y1, x2, y2 = box.tolist()
@@ -450,26 +471,19 @@ class BurevestnikApp(ctk.CTk):
                     bg_color=bgr_to_rgb(colors.get(cls_id, (128, 128, 128))),
                 )
 
-        to_delete = [
-            tid
-            for tid in self.track_history
-            if self.frame_idx - self.track_last_seen.get(tid, 0) > max_missed
-        ]
+        if not self.is_hide:
+            to_delete = [
+                tid
+                for tid in self.track_history
+                if self.frame_idx - self.track_last_seen.get(tid, 0) > max_missed
+            ]
 
-        for tid in to_delete:
-            self.track_history.pop(tid, None)
-            self.track_last_seen.pop(tid, None)
-            self.track_class.pop(tid, None)
+            for tid in to_delete:
+                self.track_history.pop(tid, None)
+                self.track_last_seen.pop(tid, None)
+                self.track_class.pop(tid, None)
 
         return frame
-
-    def check_roi_intrusion(self, cx, cy):
-        if not self.drawing_roi:
-            return False
-        rx, ry, rw, rh = self.roi_coords
-        if rw <= 0 or rh <= 0:
-            return False
-        return rx <= cx <= rx + rw and ry <= cy <= ry + rh
 
     def update_table(self):
         detections_sorted = sorted(self.current_detections, key=lambda d: d[0])[:5]
