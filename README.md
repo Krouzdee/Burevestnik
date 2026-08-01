@@ -307,6 +307,7 @@ best_drone_detect_scale.pt
 
 ### Демонстрация систему
 
-<video src="demo.mp4" width="100%" controls></video>
+![Демонстрация системы](demo.gif)
+
 
 ---
